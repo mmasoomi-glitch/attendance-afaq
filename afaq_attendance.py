@@ -30,6 +30,26 @@ EMPLOYEES = [
     {"name": "Masoumi",  "type": "masoumi"},
 ]
 
+# ── OVERTIME DECLARATIONS ─────────────────────────────────────────────────────
+# Key: (employee, date, session)  session = "morning" | "evening"
+# Set at clock-IN; extends OUT window from ±15 min to before:15, after:75
+overtime_flags = {}
+
+SESSION_MAP = {
+    "Morning In":  "morning",
+    "Evening In":  "evening",
+    "Morning Out": "morning",
+    "Evening Out": "evening",
+}
+
+def declare_overtime(employee, date, session):
+    overtime_flags[(employee, date, session)] = True
+
+def has_overtime(employee, date, session):
+    return overtime_flags.get((employee, date, session), False)
+
+# ─────────────────────────────────────────────────────────────────────────────
+
 def get_local_ip():
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -90,11 +110,12 @@ def ask_startup_confirmation():
     except Exception as e:
         print(f"  [Startup] Error: {e}")
 
-def is_within_window(t, mins=15):
+def is_within_window(t, before_mins=15, after_mins=15):
+    """Standard ±15 min. Overtime OUT: before=15, after=75 (1hr extra)."""
     now = datetime.now()
     h, m = map(int, t.split(":"))
     target = datetime.combine(now.date(), datetime.min.time().replace(hour=h, minute=m))
-    return (target - timedelta(minutes=mins)) <= now <= (target + timedelta(minutes=mins))
+    return (target - timedelta(minutes=before_mins)) <= now <= (target + timedelta(minutes=after_mins))
 
 def save_entry(entry):
     logs = []
@@ -162,6 +183,13 @@ button{display:block;width:100%;padding:9px 12px;margin:5px 0;border:none;border
 .btn-on{background:linear-gradient(135deg,#00c853,#1de9b6);color:#001a0e;font-weight:bold;box-shadow:0 0 12px #00c85344}
 .btn-on:hover{transform:scale(1.02);box-shadow:0 0 20px #00c85377}
 .btn-off{background:#0d1726;color:#1e3a5f;cursor:not-allowed;border:1px solid #111d30}
+
+/* ── OVERTIME ── */
+.ot-box{background:#0d1f12;border:1px solid #1a5a2a;border-radius:6px;padding:7px 10px;margin:3px 0 6px;display:flex;align-items:center;gap:8px;cursor:pointer}
+.ot-box input[type=checkbox]{accent-color:#f0c040;width:15px;height:15px;cursor:pointer;flex-shrink:0}
+.ot-label{font-size:.72em;color:#7fc89a;line-height:1.3}
+.ot-label strong{color:#f0c040}
+.ot-active{background:linear-gradient(135deg,#7b4a00,#c07800);color:#fff8e1;font-size:.68em;padding:4px 8px;border-radius:4px;margin:3px 0;text-align:center;letter-spacing:1px}
 
 /* ── TODAY LOG ── */
 .logs-wrap{max-width:660px;margin:0 auto 32px;padding:0 16px}
@@ -252,7 +280,18 @@ button{display:block;width:100%;padding:9px 12px;margin:5px 0;border:none;border
       <input type="hidden" name="employee" value="{{ emp.name }}">
       <input type="hidden" name="label" value="{{ s.label }}">
       <input type="hidden" name="time" value="{{ s.time }}">
-      <button type="submit" class="btn-on">▶ {{ s.label }}<br><span style="opacity:.7;font-size:.85em">{{ s.time }}</span></button>
+      {% if s.is_in %}
+        <button type="submit" class="btn-on">▶ {{ s.label }}<br><span style="opacity:.7;font-size:.85em">{{ s.time }}</span></button>
+        <label class="ot-box">
+          <input type="checkbox" name="overtime" value="1">
+          <span class="ot-label">🕐 Staying extra today?<br><strong>+1 hr overtime</strong> (out window +1h15)</span>
+        </label>
+      {% elif s.is_out %}
+        {% if s.overtime_active %}<div class="ot-active">⏱ OVERTIME ACTIVE — window extended +1hr</div>{% endif %}
+        <button type="submit" class="btn-on">▶ {{ s.label }}<br><span style="opacity:.7;font-size:.85em">{{ s.time }}{% if s.overtime_active %} +1hr{% endif %}</span></button>
+      {% else %}
+        <button type="submit" class="btn-on">▶ {{ s.label }}<br><span style="opacity:.7;font-size:.85em">{{ s.time }}</span></button>
+      {% endif %}
     </form>
     {% else %}
     <button class="btn-off" disabled>⬛ {{ s.label }}<br><span style="font-size:.85em">{{ s.time }}</span></button>
@@ -277,6 +316,7 @@ button{display:block;width:100%;padding:9px 12px;margin:5px 0;border:none;border
         <span class="l-emp">{{ l.employee }}</span>
         <span class="l-event">{{ l.label }}</span>
         <span class="l-sched">→ {{ l.scheduled }}</span>
+        {% if l.overtime_declared %}<span style="color:#f0c040;font-size:.8em">⏱+1hr</span>{% endif %}
         <span class="l-time">{{ l.timestamp }}</span>
       </div>
       {% endfor %}
@@ -304,6 +344,15 @@ button{display:block;width:100%;padding:9px 12px;margin:5px 0;border:none;border
       <div class="g-row"><span class="g-icon">3️⃣</span><span class="g-text">When your shift time is near, your button turns <strong style="color:#00c853">GREEN</strong> — press it immediately</span></div>
       <div class="g-row"><span class="g-icon">4️⃣</span><span class="g-text">You will see a <strong style="color:#00c853">green confirmation</strong> message. That means it's saved. Done.</span></div>
       <div class="g-row"><span class="g-icon">5️⃣</span><span class="g-text">Do this <strong>4 times per day</strong>: Morning In, Morning Out, Evening In, Evening Out</span></div>
+    </div>
+
+    <!-- OVERTIME -->
+    <div class="g-section">
+      <div class="g-title">⏱ OVERTIME — STAYING EXTRA</div>
+      <div class="g-row"><span class="g-icon">🕐</span><span class="g-text">When clocking <strong>IN</strong>, tick <strong style="color:#f0c040">"Staying extra today? +1hr overtime"</strong> if you plan to stay longer</span></div>
+      <div class="g-row"><span class="g-icon">📌</span><span class="g-text">This extends your <strong>OUT window</strong> from 15 min to <strong>1 hour and 15 minutes</strong> after your scheduled finish</span></div>
+      <div class="g-row"><span class="g-icon">🟡</span><span class="g-text">Example: Morning Out 15:30 — normal closes 15:45. With overtime: closes at <strong>16:45</strong></span></div>
+      <div class="g-row"><span class="g-icon">⚠️</span><span class="g-text">Must be declared <strong>at clock-in</strong>. Cannot be added after the fact.</span></div>
     </div>
 
     <!-- SHIFT TIMES -->
@@ -369,29 +418,57 @@ function toggleGuide(){
 @app.route('/', methods=['GET', 'POST'])
 def index():
     message, error = None, False
+    today = datetime.now().strftime("%Y-%m-%d")
+
     if request.method == 'POST':
         emp_name = request.form.get('employee')
         label    = request.form.get('label')
         time     = request.form.get('time')
-        if is_within_window(time):
+        overtime = request.form.get('overtime') == '1'
+
+        session   = SESSION_MAP.get(label, "")
+        is_out    = label.endswith("Out")
+        ot_active = is_out and has_overtime(emp_name, today, session)
+        after_m   = 75 if ot_active else 15
+
+        if is_within_window(time, before_mins=15, after_mins=after_m):
             entry = {
-                "date":      datetime.now().strftime("%Y-%m-%d"),
-                "timestamp": datetime.now().strftime("%H:%M:%S"),
-                "employee":  emp_name,
-                "label":     label,
-                "scheduled": time,
-                "status":    "OK"
+                "date":              today,
+                "timestamp":         datetime.now().strftime("%H:%M:%S"),
+                "employee":          emp_name,
+                "label":             label,
+                "scheduled":         time,
+                "overtime_declared": overtime,
+                "status":            "OK"
             }
             save_entry(entry)
-            message = f"✅ {emp_name} — {label} logged at {entry['timestamp']}"
+            if overtime and label.endswith("In"):
+                declare_overtime(emp_name, today, session)
+            ot_note = " (⏱ overtime +1hr declared)" if overtime else ""
+            message = f"✅ {emp_name} — {label} logged at {entry['timestamp']}{ot_note}"
         else:
-            message = f"❌ Outside 15-min window for {label} ({time})"
+            message = f"❌ Outside window for {label} ({time})"
             error = True
 
     emp_data = []
     for e in EMPLOYEES:
-        shifts = [{"label": s["label"], "time": s["time"], "active": is_within_window(s["time"])}
-                  for s in SCHEDULES[e["type"]]]
+        shifts = []
+        for s in SCHEDULES[e["type"]]:
+            lbl     = s["label"]
+            session = SESSION_MAP.get(lbl, "")
+            is_in   = lbl.endswith("In")
+            is_out  = lbl.endswith("Out")
+            ot_flag = is_out and has_overtime(e["name"], today, session)
+            after_m = 75 if ot_flag else 15
+            active  = is_within_window(s["time"], before_mins=15, after_mins=after_m)
+            shifts.append({
+                "label":           lbl,
+                "time":            s["time"],
+                "active":          active,
+                "is_in":           is_in,
+                "is_out":          is_out,
+                "overtime_active": ot_flag,
+            })
         emp_data.append({"name": e["name"], "shifts": shifts})
 
     return render_template_string(HTML,
@@ -411,9 +488,10 @@ def export():
         with open(DATA_FILE, 'r') as f:
             try: logs = json.load(f)
             except: pass
-    lines = ["Date,Time,Employee,Event,Scheduled,Status"]
+    lines = ["Date,Time,Employee,Event,Scheduled,Overtime,Status"]
     for l in logs:
-        lines.append(f"{l.get('date','')},{l.get('timestamp','')},{l.get('employee','')},{l.get('label','')},{l.get('scheduled','')},{l.get('status','')}")
+        ot = "YES" if l.get("overtime_declared") else "NO"
+        lines.append(f"{l.get('date','')},{l.get('timestamp','')},{l.get('employee','')},{l.get('label','')},{l.get('scheduled','')},{ot},{l.get('status','')}")
     return Response("\n".join(lines), mimetype="text/csv",
                     headers={"Content-Disposition": "attachment;filename=afaq_attendance.csv"})
 
