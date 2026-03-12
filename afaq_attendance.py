@@ -64,45 +64,58 @@ def get_local_ip():
 
 LOCAL_IP = get_local_ip()
 
-def open_firewall():
+def revoke_firewall():
+    """Remove the AfaqAttendance firewall rule silently."""
     if platform.system() != "Windows":
         return
     try:
-        subprocess.run(['netsh','advfirewall','firewall','delete','rule','name=AfaqAttendance'], capture_output=True)
+        subprocess.run(
+            ['netsh','advfirewall','firewall','delete','rule','name=AfaqAttendance'],
+            capture_output=True)
+        print(f"  [Firewall] Rule revoked — port {PORT} closed.")
+    except Exception as e:
+        print(f"  [Firewall] Revoke error: {e}")
+
+def open_firewall():
+    """Step 1: revoke any leftover rule. Step 2: open fresh."""
+    if platform.system() != "Windows":
+        return
+    # Always clean first — no stale rules from previous sessions
+    revoke_firewall()
+    try:
         result = subprocess.run(
             ['netsh','advfirewall','firewall','add','rule',
              'name=AfaqAttendance','dir=in','action=allow',
              'protocol=TCP',f'localport={PORT}','profile=private,domain'],
             capture_output=True, text=True)
-        status = "✅ opened" if result.returncode == 0 else "⚠️ failed (run as Admin)"
+        status = "✅ opened fresh" if result.returncode == 0 else "⚠️ failed (run as Admin)"
         print(f"  [Firewall] Port {PORT} {status}")
     except Exception as e:
-        print(f"  [Firewall] Error: {e}")
+        print(f"  [Firewall] Open error: {e}")
 
-def revoke_firewall():
-    """Remove the firewall rule — called at 23:59 every day for clean port trace."""
-    if platform.system() != "Windows":
-        return
-    try:
-        subprocess.run(['netsh','advfirewall','firewall','delete','rule','name=AfaqAttendance'], capture_output=True)
-        print(f"  [Firewall] Port {PORT} rule revoked at 23:59 — daily cleanup.")
-    except Exception as e:
-        print(f"  [Firewall] Revoke error: {e}")
-
-def daily_firewall_cleanup():
-    """Background thread: waits until 23:59:00 each day, revokes port, reopens next morning on launch."""
+def daily_shutdown():
+    """
+    Background thread:
+      — Waits until 23:59:00 each day
+      — Revokes firewall rule
+      — Shuts down the exe cleanly
+    App is restarted fresh next morning via Task Scheduler / Startup folder.
+    """
+    import time as _time
     while True:
-        now = datetime.now()
-        # Calculate seconds until 23:59:00 today
+        now    = datetime.now()
         target = now.replace(hour=23, minute=59, second=0, microsecond=0)
         if now >= target:
-            # Already past 23:59 today — aim for tomorrow
             target += timedelta(days=1)
         wait_seconds = (target - now).total_seconds()
-        print(f"  [Firewall] Next cleanup scheduled in {int(wait_seconds//3600)}h {int((wait_seconds%3600)//60)}m")
-        import time as _time
+        h, m = int(wait_seconds // 3600), int((wait_seconds % 3600) // 60)
+        print(f"  [Scheduler] Daily shutdown scheduled in {h}h {m}m (at 23:59)")
         _time.sleep(wait_seconds)
+
+        print("\n  [Scheduler] 23:59 — revoking firewall and shutting down...")
         revoke_firewall()
+        _time.sleep(2)   # brief pause so revoke completes
+        os._exit(0)      # clean exit — kills Flask + all threads
 
 def add_to_startup():
     try:
@@ -742,7 +755,7 @@ if __name__ == '__main__':
     print(f"  Network: http://{LOCAL_IP}:{PORT}  ← share this")
     print("="*54 + "\n")
     threading.Thread(target=open_firewall,            daemon=True).start()
-    threading.Thread(target=daily_firewall_cleanup,   daemon=True).start()
+    threading.Thread(target=daily_shutdown,           daemon=True).start()
     threading.Thread(target=ask_startup_confirmation, daemon=True).start()
     threading.Thread(target=open_browser,             daemon=True).start()
     app.run(host='0.0.0.0', port=PORT, debug=False, use_reloader=False)
