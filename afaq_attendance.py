@@ -8,6 +8,8 @@ BASE_DIR = os.path.dirname(os.path.abspath(sys.executable if getattr(sys, 'froze
 DATA_FILE    = os.path.join(BASE_DIR, 'attendance_data.json')
 ANNOUNCE_FILE = os.path.join(BASE_DIR, 'announcements.json')  # append-only, never overwritten
 MESSAGES_FILE = os.path.join(BASE_DIR, 'messages.json')        # written by WhatsApp bridge, read-only here
+QR_STATE_FILE = os.path.join(BASE_DIR, 'qr_state.json')        # written by bridge: QR image + connection state
+BRIDGE_DIR    = os.path.join(BASE_DIR, 'whatsapp-bridge')
 STARTUP_FLAG = os.path.join(BASE_DIR, '.startup_done')
 
 SCHEDULES = {
@@ -209,6 +211,34 @@ def get_messages(limit=50):
         except: return []
     return msgs[-limit:]
 
+def get_qr_state():
+    """Read QR state written by the bridge."""
+    if not os.path.exists(QR_STATE_FILE):
+        return {"state": "bridge_not_running", "qr": None}
+    with open(QR_STATE_FILE, 'r') as f:
+        try: return json.load(f)
+        except: return {"state": "error", "qr": None}
+
+def start_bridge():
+    """Launch the Node.js WhatsApp bridge as a subprocess."""
+    bridge_js = os.path.join(BRIDGE_DIR, 'bridge.js')
+    if not os.path.exists(bridge_js):
+        print("  [Bridge] bridge.js not found — skipping.")
+        return
+    # Find node executable
+    node = 'node'
+    try:
+        subprocess.Popen(
+            [node, bridge_js],
+            cwd=BRIDGE_DIR,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=subprocess.CREATE_NO_WINDOW if platform.system() == 'Windows' else 0
+        )
+        print("  [Bridge] WhatsApp bridge started.")
+    except FileNotFoundError:
+        print("  [Bridge] Node.js not found. Install Node.js to enable WhatsApp panel.")
+
 HTML = """
 <!DOCTYPE html>
 <html lang="en">
@@ -376,6 +406,13 @@ button{display:block;width:100%;padding:9px 12px;margin:5px 0;border:none;border
 }
 .wa-empty-icon{font-size:3em;display:block;margin-bottom:12px;opacity:.3}
 
+/* ── QR SCAN ── */
+.wa-qr-wrap{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:40px 20px;min-height:420px}
+.wa-qr-title{font-family:'Orbitron',sans-serif;font-size:.9em;color:#25d366;letter-spacing:2px;margin-bottom:8px}
+.wa-qr-sub{font-size:.75em;color:#8696a0;margin-bottom:24px;text-align:center}
+.wa-qr-img{width:240px;height:240px;border-radius:12px;border:4px solid #25d366;padding:8px;background:#fff;box-shadow:0 0 30px rgba(37,211,102,.3)}
+.wa-qr-note{font-size:.68em;color:#3a4a54;margin-top:16px;text-align:center}
+
 .wa-footer{
   background:#1f2c33;padding:10px 16px;
   border-radius:0 0 14px 14px;
@@ -502,20 +539,24 @@ button{display:block;width:100%;padding:9px 12px;margin:5px 0;border:none;border
   </div>
 
   <div class="wa-body" id="waBody">
-    {% if wa_messages %}
+    {% if qr_state.state == 'waiting_scan' and qr_state.qr %}
+      <!-- ── QR SCAN SCREEN ── -->
+      <div class="wa-qr-wrap">
+        <div class="wa-qr-title">📱 Scan to connect WhatsApp</div>
+        <div class="wa-qr-sub">Open WhatsApp Business → ⋮ → Linked Devices → Link a Device</div>
+        <img src="{{ qr_state.qr }}" class="wa-qr-img" alt="WhatsApp QR Code">
+        <div class="wa-qr-note">QR refreshes automatically · Page auto-reloads every 15s</div>
+      </div>
+    {% elif qr_state.state == 'connected' and wa_messages %}
       {% set ns = namespace(last_date='') %}
       {% for m in wa_messages %}
         {% if m.date != ns.last_date %}
-          <div class="wa-date-divider">
-            <span>{{ m.date }}</span>
-          </div>
+          <div class="wa-date-divider"><span>{{ m.date }}</span></div>
           {% set ns.last_date = m.date %}
         {% endif %}
         <div class="wa-bubble-wrap {{ 'from-me' if m.from_me else 'from-them' }}">
           <div class="wa-bubble {{ 'from-me' if m.from_me else 'from-them' }}">
-            {% if not m.from_me %}
-            <span class="wa-sender">{{ m.sender }}</span>
-            {% endif %}
+            {% if not m.from_me %}<span class="wa-sender">{{ m.sender }}</span>{% endif %}
             <span class="wa-text">{{ m.body }}</span>
             <div class="wa-meta">
               <span class="wa-time">{{ m.timestamp }}</span>
@@ -524,11 +565,15 @@ button{display:block;width:100%;padding:9px 12px;margin:5px 0;border:none;border
           </div>
         </div>
       {% endfor %}
+    {% elif qr_state.state == 'connected' %}
+      <div class="wa-empty">
+        <span class="wa-empty-icon">✅</span>
+        WhatsApp connected.<br>No messages yet — they will appear here as they arrive.
+      </div>
     {% else %}
       <div class="wa-empty">
-        <span class="wa-empty-icon">💬</span>
-        No messages yet.<br>
-        Start the WhatsApp bridge on the server PC<br>and messages will appear here automatically.
+        <span class="wa-empty-icon">⏳</span>
+        Starting WhatsApp bridge...<br>QR code will appear here in a few seconds.
       </div>
     {% endif %}
   </div>
@@ -623,35 +668,59 @@ function toggleGuide(){
   a.textContent=b.classList.contains('open')?'▲':'▼';
 }
 
-// ── WhatsApp panel: scroll to bottom on load ──
 (function(){
+  // Scroll WA panel to bottom
   var body = document.getElementById('waBody');
   if(body) body.scrollTop = body.scrollHeight;
 
-  // Poll /api/messages every 8 seconds for new messages
-  var lastCount = document.querySelectorAll('.wa-bubble').length;
+  var lastMsgCount = document.querySelectorAll('.wa-bubble').length;
+  var isWaitingQR  = document.querySelector('.wa-qr-img') !== null;
+
+  // Poll faster when waiting for QR scan (5s), slower when connected (8s)
+  var pollInterval = isWaitingQR ? 5000 : 8000;
 
   setInterval(function(){
-    fetch('/api/messages')
+    fetch('/api/qr')
       .then(r => r.json())
-      .then(function(msgs){
+      .then(function(qs){
         var dot    = document.getElementById('waDot');
         var status = document.getElementById('waStatus');
-        dot.style.background = '#25d366';
-        status.textContent   = 'live';
 
-        if(msgs.length !== lastCount){
-          lastCount = msgs.length;
-          location.reload(); // simple reload to re-render bubbles
+        if(qs.state === 'connected'){
+          dot.style.background = '#25d366';
+          status.textContent   = 'connected';
+          // If we were on QR screen, reload to show messages
+          if(isWaitingQR){ location.reload(); return; }
+        } else if(qs.state === 'waiting_scan'){
+          dot.style.background = '#f0c040';
+          status.textContent   = 'scan QR';
+          // Reload to get fresh QR image
+          if(!isWaitingQR){ location.reload(); return; }
+          // Refresh QR image in place if already showing
+          var img = document.querySelector('.wa-qr-img');
+          if(img && qs.qr && qs.qr !== img.src){ img.src = qs.qr; }
+        } else {
+          dot.style.background = '#e74c3c';
+          status.textContent   = 'bridge starting...';
         }
       })
       .catch(function(){
-        var dot    = document.getElementById('waDot');
-        var status = document.getElementById('waStatus');
+        var dot = document.getElementById('waDot');
         dot.style.background = '#f0c040';
-        status.textContent   = 'bridge offline';
+        document.getElementById('waStatus').textContent = 'reconnecting...';
       });
-  }, 8000);
+
+    // Check for new messages
+    fetch('/api/messages')
+      .then(r => r.json())
+      .then(function(msgs){
+        if(msgs.length !== lastMsgCount){
+          lastMsgCount = msgs.length;
+          location.reload();
+        }
+      }).catch(()=>{});
+
+  }, pollInterval);
 })();
 </script>
 </body>
@@ -718,6 +787,7 @@ def index():
         employees=emp_data,
         today_logs=get_today_logs(),
         wa_messages=get_messages(50),
+        qr_state=get_qr_state(),
         now_time=datetime.now().strftime("%H:%M:%S"),
         today_date=datetime.now().strftime("%A, %d %B %Y"),
         local_ip=LOCAL_IP,
@@ -744,6 +814,11 @@ def api_messages():
     from flask import jsonify
     return jsonify(get_messages(50))
 
+@app.route('/api/qr')
+def api_qr():
+    from flask import jsonify
+    return jsonify(get_qr_state())
+
 def open_browser():
     import time; time.sleep(1.5)
     webbrowser.open(f"http://{LOCAL_IP}:{PORT}")
@@ -767,5 +842,6 @@ if __name__ == '__main__':
     threading.Thread(target=open_firewall,            daemon=True).start()
     threading.Thread(target=daily_shutdown,           daemon=True).start()
     threading.Thread(target=ask_startup_confirmation, daemon=True).start()
+    threading.Thread(target=start_bridge,             daemon=True).start()
     threading.Thread(target=open_browser,             daemon=True).start()
     app.run(host='0.0.0.0', port=PORT, debug=False, use_reloader=False)
