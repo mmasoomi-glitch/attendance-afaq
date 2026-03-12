@@ -5,7 +5,9 @@ from flask import Flask, render_template_string, request, Response
 app = Flask(__name__)
 PORT = 3456
 BASE_DIR = os.path.dirname(os.path.abspath(sys.executable if getattr(sys, 'frozen', False) else __file__))
-DATA_FILE = os.path.join(BASE_DIR, 'attendance_data.json')
+DATA_FILE    = os.path.join(BASE_DIR, 'attendance_data.json')
+ANNOUNCE_FILE = os.path.join(BASE_DIR, 'announcements.json')  # append-only, never overwritten
+MESSAGES_FILE = os.path.join(BASE_DIR, 'messages.json')        # written by WhatsApp bridge, read-only here
 STARTUP_FLAG = os.path.join(BASE_DIR, '.startup_done')
 
 SCHEDULES = {
@@ -135,6 +137,40 @@ def get_today_logs():
         except: return []
     return [l for l in logs if l.get("date") == today]
 
+# ── ANNOUNCEMENTS (append-only, separate file) ────────────────────────────────
+MANAGER_PIN = "1234"   # change this to your preferred PIN
+
+def save_announcement(msg, sender="Management"):
+    """Append a new announcement — never overwrites existing messages."""
+    msgs = []
+    if os.path.exists(ANNOUNCE_FILE):
+        with open(ANNOUNCE_FILE, 'r') as f:
+            try: msgs = json.load(f)
+            except: msgs = []
+    msgs.append({
+        "date":      datetime.now().strftime("%Y-%m-%d"),
+        "timestamp": datetime.now().strftime("%H:%M"),
+        "sender":    sender,
+        "message":   msg,
+    })
+    with open(ANNOUNCE_FILE, 'w') as f:
+        json.dump(msgs, f, indent=4)
+
+def get_announcements(limit=30):
+    if not os.path.exists(ANNOUNCE_FILE): return []
+    with open(ANNOUNCE_FILE, 'r') as f:
+        try: msgs = json.load(f)
+        except: return []
+    return msgs[-limit:]  # last 30 only
+
+def get_messages(limit=50):
+    """Read WhatsApp messages written by the bridge. Never writes — read-only."""
+    if not os.path.exists(MESSAGES_FILE): return []
+    with open(MESSAGES_FILE, 'r') as f:
+        try: msgs = json.load(f)
+        except: return []
+    return msgs[-limit:]
+
 HTML = """
 <!DOCTYPE html>
 <html lang="en">
@@ -225,7 +261,92 @@ button{display:block;width:100%;padding:9px 12px;margin:5px 0;border:none;border
 .kpi-table .good{color:#00c853}
 .kpi-table .bad{color:#e74c3c}
 
-/* ── TOAST ── */
+/* ── WHATSAPP PANEL ── */
+.wa-panel{
+  width:100%;max-width:1920px;margin:32px auto 0;
+  padding:0 16px;
+}
+.wa-header{
+  display:flex;align-items:center;gap:12px;
+  background:#075e54;
+  padding:14px 20px;border-radius:14px 14px 0 0;
+}
+.wa-avatar{
+  width:42px;height:42px;border-radius:50%;
+  background:#25d366;display:flex;align-items:center;justify-content:center;
+  font-size:1.3em;flex-shrink:0;
+}
+.wa-title{font-family:'Orbitron',sans-serif;font-size:.85em;color:#fff;letter-spacing:1px}
+.wa-sub{font-size:.7em;color:#a8d5c2;margin-top:2px}
+.wa-status{margin-left:auto;display:flex;align-items:center;gap:6px;font-size:.7em;color:#a8d5c2}
+.wa-dot{width:8px;height:8px;border-radius:50%;background:#25d366;animation:blink 2s infinite}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:.3}}
+
+.wa-body{
+  background:#0b141a;
+  background-image: url("data:image/svg+xml,%3Csvg width='60' height='60' viewBox='0 0 60 60' xmlns='http://www.w3.org/2000/svg'%3E%3Cg fill='none' fill-rule='evenodd'%3E%3Cg fill='%23ffffff' fill-opacity='0.02'%3E%3Cpath d='M36 34v-4h-2v4h-4v2h4v4h2v-4h4v-2h-4zm0-30V0h-2v4h-4v2h4v4h2V6h4V4h-4zM6 34v-4H4v4H0v2h4v4h2v-4h4v-2H6zM6 4V0H4v4H0v2h4v4h2V6h4V4H6z'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E");
+  min-height:480px;max-height:600px;overflow-y:auto;
+  padding:20px 16px;
+  border-left:1px solid #1f2c33;border-right:1px solid #1f2c33;
+  scroll-behavior:smooth;
+}
+@media(min-width:1200px){.wa-body{min-height:560px;max-height:680px}}
+@media(min-width:1920px){.wa-body{min-height:640px;max-height:760px}}
+
+.wa-date-divider{
+  text-align:center;margin:12px 0;
+}
+.wa-date-divider span{
+  background:#1f2c33;color:#8696a0;font-size:.7em;padding:4px 12px;border-radius:8px;
+}
+.wa-bubble-wrap{display:flex;margin:3px 0;padding:0 4px}
+.wa-bubble-wrap.from-me{justify-content:flex-end}
+.wa-bubble-wrap.from-them{justify-content:flex-start}
+
+.wa-bubble{
+  max-width:65%;min-width:120px;
+  padding:8px 12px 6px;border-radius:8px;
+  position:relative;word-break:break-word;
+  box-shadow:0 1px 2px rgba(0,0,0,.4);
+}
+@media(max-width:600px){.wa-bubble{max-width:88%}}
+@media(min-width:1920px){.wa-bubble{max-width:45%}}
+
+.wa-bubble.from-them{
+  background:#202c33;
+  border-top-left-radius:2px;
+}
+.wa-bubble.from-me{
+  background:#005c4b;
+  border-top-right-radius:2px;
+}
+.wa-sender{
+  font-size:.72em;font-weight:bold;color:#25d366;
+  margin-bottom:3px;display:block;
+}
+.wa-text{font-size:.88em;color:#e9edef;line-height:1.5}
+.wa-meta{
+  display:flex;justify-content:flex-end;align-items:center;
+  gap:4px;margin-top:4px;
+}
+.wa-time{font-size:.67em;color:#8696a0}
+.wa-tick{font-size:.75em;color:#53bdeb}
+
+.wa-empty{
+  text-align:center;padding:80px 20px;color:#3a4a54;
+  font-size:.85em;
+}
+.wa-empty-icon{font-size:3em;display:block;margin-bottom:12px;opacity:.3}
+
+.wa-footer{
+  background:#1f2c33;padding:10px 16px;
+  border-radius:0 0 14px 14px;
+  border:1px solid #2a3942;border-top:none;
+  display:flex;align-items:center;gap:10px;
+}
+.wa-readonly{color:#8696a0;font-size:.75em;font-style:italic}
+.wa-refresh{background:#075e54;color:#fff;border:none;border-radius:20px;padding:6px 16px;font-size:.72em;cursor:pointer;font-family:'Share Tech Mono',monospace}
+.wa-refresh:hover{background:#128c7e}
 .toast{position:fixed;top:20px;right:20px;padding:12px 20px;border-radius:8px;font-size:.82em;z-index:999;animation:sli .3s ease;box-shadow:0 4px 20px rgba(0,0,0,.5);max-width:300px}
 .t-ok{background:#00c853;color:#001a0e;font-weight:bold}
 .t-err{background:#c0392b;color:#fff}
@@ -327,7 +448,60 @@ button{display:block;width:100%;padding:9px 12px;margin:5px 0;border:none;border
 </div>
 
 <!-- ══════════════════════════════════════════════ -->
-<!--            📖 GUIDE & HELP SECTION            -->
+<!--         📱 WHATSAPP BROADCAST PANEL          -->
+<!-- ══════════════════════════════════════════════ -->
+<div class="wa-panel">
+  <div class="wa-header">
+    <div class="wa-avatar">🏢</div>
+    <div>
+      <div class="wa-title">AFAQ ALNASEEM</div>
+      <div class="wa-sub">Business WhatsApp — Staff Broadcast</div>
+    </div>
+    <div class="wa-status">
+      <div class="wa-dot" id="waDot"></div>
+      <span id="waStatus">connecting...</span>
+    </div>
+  </div>
+
+  <div class="wa-body" id="waBody">
+    {% if wa_messages %}
+      {% set ns = namespace(last_date='') %}
+      {% for m in wa_messages %}
+        {% if m.date != ns.last_date %}
+          <div class="wa-date-divider">
+            <span>{{ m.date }}</span>
+          </div>
+          {% set ns.last_date = m.date %}
+        {% endif %}
+        <div class="wa-bubble-wrap {{ 'from-me' if m.from_me else 'from-them' }}">
+          <div class="wa-bubble {{ 'from-me' if m.from_me else 'from-them' }}">
+            {% if not m.from_me %}
+            <span class="wa-sender">{{ m.sender }}</span>
+            {% endif %}
+            <span class="wa-text">{{ m.body }}</span>
+            <div class="wa-meta">
+              <span class="wa-time">{{ m.timestamp }}</span>
+              {% if m.from_me %}<span class="wa-tick">✓✓</span>{% endif %}
+            </div>
+          </div>
+        </div>
+      {% endfor %}
+    {% else %}
+      <div class="wa-empty">
+        <span class="wa-empty-icon">💬</span>
+        No messages yet.<br>
+        Start the WhatsApp bridge on the server PC<br>and messages will appear here automatically.
+      </div>
+    {% endif %}
+  </div>
+
+  <div class="wa-footer">
+    <span class="wa-readonly">🔒 Read-only — Messages from Afaq Business WhatsApp</span>
+    <button class="wa-refresh" onclick="location.reload()">↻ Refresh</button>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════ -->
 <!-- ══════════════════════════════════════════════ -->
 <div class="guide">
   <button class="guide-toggle" onclick="toggleGuide()">
@@ -410,6 +584,37 @@ function toggleGuide(){
   b.classList.toggle('open');
   a.textContent=b.classList.contains('open')?'▲':'▼';
 }
+
+// ── WhatsApp panel: scroll to bottom on load ──
+(function(){
+  var body = document.getElementById('waBody');
+  if(body) body.scrollTop = body.scrollHeight;
+
+  // Poll /api/messages every 8 seconds for new messages
+  var lastCount = document.querySelectorAll('.wa-bubble').length;
+
+  setInterval(function(){
+    fetch('/api/messages')
+      .then(r => r.json())
+      .then(function(msgs){
+        var dot    = document.getElementById('waDot');
+        var status = document.getElementById('waStatus');
+        dot.style.background = '#25d366';
+        status.textContent   = 'live';
+
+        if(msgs.length !== lastCount){
+          lastCount = msgs.length;
+          location.reload(); // simple reload to re-render bubbles
+        }
+      })
+      .catch(function(){
+        var dot    = document.getElementById('waDot');
+        var status = document.getElementById('waStatus');
+        dot.style.background = '#f0c040';
+        status.textContent   = 'bridge offline';
+      });
+  }, 8000);
+})();
 </script>
 </body>
 </html>
@@ -474,6 +679,7 @@ def index():
     return render_template_string(HTML,
         employees=emp_data,
         today_logs=get_today_logs(),
+        wa_messages=get_messages(50),
         now_time=datetime.now().strftime("%H:%M:%S"),
         today_date=datetime.now().strftime("%A, %d %B %Y"),
         local_ip=LOCAL_IP,
@@ -494,6 +700,11 @@ def export():
         lines.append(f"{l.get('date','')},{l.get('timestamp','')},{l.get('employee','')},{l.get('label','')},{l.get('scheduled','')},{ot},{l.get('status','')}")
     return Response("\n".join(lines), mimetype="text/csv",
                     headers={"Content-Disposition": "attachment;filename=afaq_attendance.csv"})
+
+@app.route('/api/messages')
+def api_messages():
+    from flask import jsonify
+    return jsonify(get_messages(50))
 
 def open_browser():
     import time; time.sleep(1.5)
