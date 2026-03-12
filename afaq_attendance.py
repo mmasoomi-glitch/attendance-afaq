@@ -748,7 +748,17 @@ def open_browser():
     import time; time.sleep(1.5)
     webbrowser.open(f"http://{LOCAL_IP}:{PORT}")
 
+import signal
+
+def graceful_exit(signum, frame):
+    print("\n  [Ctrl+C] Caught interrupt — revoking firewall rule before exit...")
+    revoke_firewall()
+    print("  [Ctrl+C] Port cleared. Goodbye.")
+    os._exit(0)
+
 if __name__ == '__main__':
+    signal.signal(signal.SIGINT,  graceful_exit)
+    signal.signal(signal.SIGTERM, graceful_exit)
     print("\n" + "="*54)
     print("  🌙 AFAQ ATTENDANCE — Ramadan KPI")
     print(f"  Local:   http://localhost:{PORT}")
